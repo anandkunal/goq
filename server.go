@@ -24,6 +24,7 @@ const (
 
 var (
 	max_memory_bytes   int
+	address            string
 	port               int
 	journal_directory  string
 	journal_mutex      *sync.Mutex    = new(sync.Mutex)
@@ -207,19 +208,25 @@ func main() {
 	port_usage := "Port to listen on. Default is 11311."
 	flag.IntVar(&port, "port", 11311, port_usage)
 	flag.IntVar(&port, "p", 11311, port_usage+" (shorthand)")
+	address_usage := "Address to listen on. Default is all."
+	flag.StringVar(&address, "address", "", address_usage)
+	flag.StringVar(&address, "a", "", address_usage+" (shorthand)")
 	journal_usage := "Journals directory. Default is journals (current directory)."
 	flag.StringVar(&journal_directory, "journals", "journals", journal_usage)
 	flag.StringVar(&journal_directory, "j", "journals", journal_usage+" (shorthand)")
 	flag.Parse()
 	log.Printf("Memory bytes: %d\n", max_memory_bytes)
-	log.Printf("Listening on port: %d\n", port)
+	log.Printf("Listening on port: %d", port)
+	if address != "" {
+		log.Printf("Listening on address: %s\n", address)
+	}
 	log.Printf("Journals directory: %s\n", journal_directory)
 
 	if exists, _ := journals_dir_exists(journal_directory); !exists {
 		log.Panicf("Journals directory: %s does not exist\n", journal_directory)
 	}
 
-	server, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	server, err := net.Listen("tcp", fmt.Sprintf("%s:%d", address, port))
 	if err != nil {
 		log.Panic(err)
 	}

@@ -32,6 +32,10 @@ These three parameters are:
 
 - **[j]ournals** - the path to the journals directory. Make sure that this directory already exists. Create/adjust the necessary permissions to ensure that goq can read/write files in this directory.
 
+By default goq listen on all addresses. If you want to listen on only one address use this parameter:
+
+- **[a]ddress** - the address that this instance of goq should listen on.
+
 
 ## Initialization
 

@@ -23,6 +23,10 @@ var (
 	dbPath     string
 
 	db *QDB
+
+	totalEnqueues int
+	totalDequeues int
+	totalEmpties  int
 )
 
 func Enqueue(w http.ResponseWriter, req *http.Request) {
@@ -44,6 +48,8 @@ func Enqueue(w http.ResponseWriter, req *http.Request) {
 	db.Put(&QueuedItem{time.Now().UnixNano(), []byte(data)})
 	w.WriteHeader(200)
 	fmt.Fprint(w, "{success:true, message:\"worked\"}")
+
+	totalEnqueues++
 }
 
 func Dequeue(w http.ResponseWriter, req *http.Request) {
@@ -80,12 +86,17 @@ func Dequeue(w http.ResponseWriter, req *http.Request) {
 	}
 
 	fmt.Fprint(w, fmt.Sprintf("{success:true, data:%s, message:\"worked\"}", string(itemsJson)))
+
+	totalDequeues += len(items)
+	if len(items) == 0 {
+		totalEmpties++
+	}
 }
 
 func Statistics(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(200)
-	fmt.Fprint(w, "{}")
+	fmt.Fprint(w, fmt.Sprintf("{\"enqueues\":%d, \"dequeues\":%d, \"empties\":%d}", totalEnqueues, totalDequeues, totalEmpties))
 }
 
 func Version(w http.ResponseWriter, req *http.Request) {

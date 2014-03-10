@@ -5,10 +5,10 @@ import (
 )
 
 type QueuedItem struct {
-	id   int64
-	data []byte
+	ID   int64
+	Data []byte
 }
 
 func (qi *QueuedItem) Size() int {
-	return (binary.Size(qi.id) + binary.Size(qi.data))
+	return (binary.Size(qi.ID) + binary.Size(qi.Data))
 }

@@ -1,248 +1,142 @@
 package main
 
 import (
-	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
-	"net"
-	"os"
-	"path/filepath"
+	"net/http"
 	"runtime"
-	"sort"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
-type State int
-
 const (
-	READ_CURRENT State = 1
-	READ_BEHIND  State = 2
+	VERSION = "1.0.0"
 )
 
 var (
-	max_memory_bytes   int
-	address            string
-	port               int
-	journal_directory  string
-	journal_mutex      *sync.Mutex    = new(sync.Mutex)
-	total_count        int            = 0
-	current_state      State          = READ_CURRENT
-	current_journal    *JournalWriter = nil
-	future_journal     *JournalWriter = nil
-	journals           []string       = make([]string, 0)
-	queued_items       []*QueuedItem  = make([]*QueuedItem, 0)
-	queued_items_bytes int            = 0
+	address    string
+	port       int
+	syncWrites bool
+	dbPath     string
+
+	db *QDB
+
+	totalEnqueues int
+	totalDequeues int
+	totalEmpties  int
 )
 
-func generate_journal_path() string {
-	return fmt.Sprintf("%s/%d.log", journal_directory, time.Now().Unix())
+func Enqueue(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+	if req.Method != "POST" {
+		w.WriteHeader(405)
+		fmt.Fprint(w, "{success:false,message:\"post request required\"}")
+		return
+	}
+
+	data := strings.TrimSpace(req.FormValue("data"))
+	if len(data) == 0 {
+		w.WriteHeader(400)
+		fmt.Fprint(w, "{success:false,message:\"data with length > 0 required\"}")
+		return
+	}
+
+	db.Put(&QueuedItem{time.Now().UnixNano(), []byte(data)})
+	w.WriteHeader(200)
+	fmt.Fprint(w, "{success:true,message:\"worked\"}")
+
+	totalEnqueues++
 }
 
-func journals_dir_exists(path string) (bool, error) {
-	_, err := os.Stat(path)
-	if err == nil {
-		return true, nil
-	}
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	return false, err
-}
+func Dequeue(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
-func healthcheck_journals() {
-	journals_list, _ := filepath.Glob(fmt.Sprintf("%s/*.log", journal_directory))
-	sort.Strings(journals_list)
-	for _, j := range journals_list {
-		log.Printf("Verifying journal: %s\n", j)
-		reader := NewJournalReader(j)
-		items := reader.Verify()
-		total_count = total_count + len(items)
-		if len(items) == 0 {
-			log.Printf("Deleting empty journal: %s\n", j)
-			reader.Delete()
-		} else {
-			reader.Close()
-			journals = append(journals, j)
-		}
+	if req.Method != "GET" {
+		w.WriteHeader(405)
+		fmt.Fprint(w, "{success:false,message:\"get request required\"}")
+		return
 	}
-}
 
-func replay_next_journal() {
-	// Load the new writer
-	future := journals[0]
-	journals = journals[1:]
-	log.Printf("Loading next journal: %s", future)
-	if len(journals) == 0 {
-		if future_journal != nil {
-			future_journal.Close()
-			future_journal = nil
-		}
-		current_state = READ_CURRENT
+	count, err := strconv.Atoi(strings.TrimSpace(req.FormValue("count")))
+	if err != nil {
+		count = 1
 	}
-	current_journal = NewJournalWriter(future)
 
-	// Replay items
-	temp_reader := NewJournalReader(current_journal.file.Name())
-	defer temp_reader.Close()
-	log.Printf("Replaying journal: %s", temp_reader.file.Name())
-	items := temp_reader.Verify()
-	for _, value := range items {
-		queued_items = append(queued_items, value)
-		queued_items_bytes = queued_items_bytes + value.Size()
-	}
-}
+	w.WriteHeader(200)
 
-func server_connections(listener net.Listener) chan net.Conn {
-	ch := make(chan net.Conn)
-	go func() {
-		for {
-			client, err := listener.Accept()
-			if err != nil {
-				log.Printf("Failed to connect to %s\n", err)
-				continue
-			}
-			log.Printf("Connected to %v\n", client.RemoteAddr())
-			ch <- client
-		}
-	}()
-	return ch
-}
-
-func handle(client net.Conn) {
-	b := bufio.NewReader(client)
-	for {
-		line, err := b.ReadBytes('\n')
-		if err != nil {
+	items := make([]string, 0)
+	for i := 0; i < count; i++ {
+		qi := db.Next(true)
+		if qi == nil {
 			break
 		}
-		chunks := strings.Split(strings.Replace(string(line), "\n", "", -1), " ")
-		if len(chunks) >= 1 {
-			switch chunks[0] {
-			case "enq":
-				journal_mutex.Lock()
-				qi := new(QueuedItem)
-				qi.id = time.Now().UnixNano()
-				qi.data = []byte(strings.Replace(strings.Replace(string(line), "enq ", "", 1), "\n", "", -1))
-				// If we have exceeded memory, then drop to read behind
-				if queued_items_bytes >= max_memory_bytes {
-					// If we have already gotten behind, check if we need to rotate the future journal
-					if current_state == READ_BEHIND {
-						if future_journal != nil && future_journal.written_byte_count >= max_memory_bytes {
-							future_journal.Close()
-							future_path := generate_journal_path()
-							journals = append(journals, future_path)
-							future_journal = NewJournalWriter(future_path)
-						}
-					} else {
-						future_path := generate_journal_path()
-						journals = append(journals, future_path)
-						future_journal = NewJournalWriter(future_path)
-						current_state = READ_BEHIND
-					}
-				}
-				// If we are in current, we push to memory
-				if current_state == READ_CURRENT {
-					queued_items = append(queued_items, qi)
-					queued_items_bytes = queued_items_bytes + qi.Size()
-					current_journal.WriteEnqueue(qi)
-				} else {
-					future_journal.WriteEnqueue(qi)
-				}
-				total_count++
-				journal_mutex.Unlock()
-
-			case "deq":
-				journal_mutex.Lock()
-			DQ:
-				if len(queued_items) > 0 {
-					qi := queued_items[0]
-					queued_items = queued_items[1:]
-					queued_items_bytes = queued_items_bytes - qi.Size()
-					total_count--
-					current_journal.WriteDequeue(qi)
-					client.Write(qi.data)
-					client.Write([]byte("\n"))
-				} else {
-					if len(journals) > 0 {
-						log.Println("Everything dequeued. Checking disk for more.")
-						current_journal.Delete()
-						replay_next_journal()
-						goto DQ
-					} else {
-						// Keep the log pruned
-						if current_state == READ_CURRENT {
-							temp_path := current_journal.file.Name()
-							current_journal.Delete()
-							current_journal = NewJournalWriter(temp_path)
-						}
-						client.Write([]byte("NIL\n"))
-						current_state = READ_CURRENT
-					}
-				}
-				journal_mutex.Unlock()
-
-			case "stats":
-				stats := fmt.Sprintf("{\"memory_count\":%d,\"total_count\":%d,\"memory_bytes\":%d\"current_state\":%d}\n", len(queued_items), total_count, queued_items_bytes, current_state)
-				client.Write([]byte(stats))
-
-			case "version":
-				client.Write([]byte("1.0\n"))
-
-			case "quit":
-				log.Printf("Disconnected %v\n", client.RemoteAddr())
-				client.Close()
-			}
-		}
+		items = append(items, string(qi.Data))
 	}
+
+	itemsJson, jsonErr := json.Marshal(items)
+
+	if jsonErr != nil {
+		w.WriteHeader(500)
+		fmt.Fprint(w, "{success:false,data:[],message:\"internal error\"}")
+		return
+	}
+
+	fmt.Fprint(w, fmt.Sprintf("{success:true,data:%s,message:\"worked\"}", string(itemsJson)))
+
+	totalDequeues += len(items)
+	if len(items) == 0 {
+		totalEmpties++
+	}
+}
+
+func Statistics(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(200)
+	fmt.Fprint(w, fmt.Sprintf("{\"enqueues\":%d,\"dequeues\":%d,\"empties\":%d}", totalEnqueues, totalDequeues, totalEmpties))
+}
+
+func Version(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(200)
+	fmt.Fprint(w, fmt.Sprintf("{version:\"%s\"}", VERSION))
+}
+
+func HealthCheck(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(200)
+	fmt.Fprint(w, 1)
+}
+
+func init() {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
+	flag.StringVar(&address, "address", "", "Address to listen on. Default is all.")
+	flag.IntVar(&port, "port", 11311, "Port to listen on. Default is 11311.")
+	flag.BoolVar(&syncWrites, "sync", true, "Synchronize database writes")
+	flag.StringVar(&dbPath, "path", "db", "Database path. Default is db in current directory.")
+	flag.Parse()
 }
 
 func main() {
-	runtime.GOMAXPROCS(2)
+	log.Printf("Listening on %s:%d\n", address, port)
+	log.Printf("DB Path: %s\n", dbPath)
 
-	memory_usage := "Maximum amount of bytes to store in memory and journals. Default is 64MB."
-	flag.IntVar(&max_memory_bytes, "memory", 67108864, memory_usage)
-	flag.IntVar(&max_memory_bytes, "m", 67108864, memory_usage+" (shorthand)")
-	port_usage := "Port to listen on. Default is 11311."
-	flag.IntVar(&port, "port", 11311, port_usage)
-	flag.IntVar(&port, "p", 11311, port_usage+" (shorthand)")
-	address_usage := "Address to listen on. Default is all."
-	flag.StringVar(&address, "address", "", address_usage)
-	flag.StringVar(&address, "a", "", address_usage+" (shorthand)")
-	journal_usage := "Journals directory. Default is journals (current directory)."
-	flag.StringVar(&journal_directory, "journals", "journals", journal_usage)
-	flag.StringVar(&journal_directory, "j", "journals", journal_usage+" (shorthand)")
-	flag.Parse()
-	log.Printf("Memory bytes: %d\n", max_memory_bytes)
-	log.Printf("Listening on port: %d", port)
-	if address != "" {
-		log.Printf("Listening on address: %s\n", address)
-	}
-	log.Printf("Journals directory: %s\n", journal_directory)
+	db = NewQDB(dbPath, syncWrites)
 
-	if exists, _ := journals_dir_exists(journal_directory); !exists {
-		log.Panicf("Journals directory: %s does not exist\n", journal_directory)
-	}
-
-	server, err := net.Listen("tcp", fmt.Sprintf("%s:%d", address, port))
-	if err != nil {
-		log.Panic(err)
-	}
-	connections := server_connections(server)
-
-	healthcheck_journals()
-	if len(journals) > 0 {
-		replay_next_journal()
-	}
-
-	if current_journal == nil {
-		current_journal = NewJournalWriter(generate_journal_path())
-	}
+	http.HandleFunc("/enqueue", Enqueue)
+	http.HandleFunc("/dequeue", Dequeue)
+	http.HandleFunc("/statistics", Statistics)
+	http.HandleFunc("/version", Version)
+	http.HandleFunc("/", HealthCheck)
 
 	log.Println("Ready...")
-	for {
-		go handle(<-connections)
+
+	err := http.ListenAndServe(fmt.Sprintf("%s:%d", address, port), nil)
+	if err != nil {
+		panic(fmt.Sprintf("goq failed to launch: %v", err))
 	}
 }

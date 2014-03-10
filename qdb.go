@@ -73,7 +73,7 @@ func (self *QDB) Put(qi *QueuedItem) error {
 	defer self.mutex.Unlock()
 
 	// Put into level
-	return self.db.Put(QDBKey(qi.id), qi.data, &self.wo)
+	return self.db.Put(QDBKey(qi.ID), qi.Data, &self.wo)
 }
 
 func (self *QDB) Remove(id int64) error {

@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -53,15 +55,31 @@ func Dequeue(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	count, err := strconv.Atoi(strings.TrimSpace(req.FormValue("count")))
+	if err != nil {
+		count = 1
+	}
+
 	w.WriteHeader(200)
 
-	qi := db.Next(true)
-	if qi == nil {
-		fmt.Fprint(w, "{success:false, data:\"\", message:\"empty queue\"}")
+	items := make([]string, 0)
+	for i := 0; i < count; i++ {
+		qi := db.Next(true)
+		if qi == nil {
+			break
+		}
+		items = append(items, string(qi.Data))
+	}
+
+	itemsJson, jsonErr := json.Marshal(items)
+
+	if jsonErr != nil {
+		w.WriteHeader(500)
+		fmt.Fprint(w, "{success:false, data:[], message:\"internal error\"}")
 		return
 	}
 
-	fmt.Fprint(w, fmt.Sprintf("{success:true, data:\"%s\", message:\"worked\"}", string(qi.data)))
+	fmt.Fprint(w, fmt.Sprintf("{success:true, data:%s, message:\"worked\"}", string(itemsJson)))
 }
 
 func Statistics(w http.ResponseWriter, req *http.Request) {

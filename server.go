@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	VERSION = "1.0"
+	VERSION = "1.0.0"
 )
 
 var (
@@ -34,20 +34,20 @@ func Enqueue(w http.ResponseWriter, req *http.Request) {
 
 	if req.Method != "POST" {
 		w.WriteHeader(405)
-		fmt.Fprint(w, "{success:false, message:\"post request required\"}")
+		fmt.Fprint(w, "{success:false,message:\"post request required\"}")
 		return
 	}
 
 	data := strings.TrimSpace(req.FormValue("data"))
 	if len(data) == 0 {
 		w.WriteHeader(400)
-		fmt.Fprint(w, "{success:false, message:\"data with length > 0 required\"}")
+		fmt.Fprint(w, "{success:false,message:\"data with length > 0 required\"}")
 		return
 	}
 
 	db.Put(&QueuedItem{time.Now().UnixNano(), []byte(data)})
 	w.WriteHeader(200)
-	fmt.Fprint(w, "{success:true, message:\"worked\"}")
+	fmt.Fprint(w, "{success:true,message:\"worked\"}")
 
 	totalEnqueues++
 }
@@ -57,7 +57,7 @@ func Dequeue(w http.ResponseWriter, req *http.Request) {
 
 	if req.Method != "GET" {
 		w.WriteHeader(405)
-		fmt.Fprint(w, "{success:false, message:\"get request required\"}")
+		fmt.Fprint(w, "{success:false,message:\"get request required\"}")
 		return
 	}
 
@@ -81,11 +81,11 @@ func Dequeue(w http.ResponseWriter, req *http.Request) {
 
 	if jsonErr != nil {
 		w.WriteHeader(500)
-		fmt.Fprint(w, "{success:false, data:[], message:\"internal error\"}")
+		fmt.Fprint(w, "{success:false,data:[],message:\"internal error\"}")
 		return
 	}
 
-	fmt.Fprint(w, fmt.Sprintf("{success:true, data:%s, message:\"worked\"}", string(itemsJson)))
+	fmt.Fprint(w, fmt.Sprintf("{success:true,data:%s,message:\"worked\"}", string(itemsJson)))
 
 	totalDequeues += len(items)
 	if len(items) == 0 {
@@ -96,7 +96,7 @@ func Dequeue(w http.ResponseWriter, req *http.Request) {
 func Statistics(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(200)
-	fmt.Fprint(w, fmt.Sprintf("{\"enqueues\":%d, \"dequeues\":%d, \"empties\":%d}", totalEnqueues, totalDequeues, totalEmpties))
+	fmt.Fprint(w, fmt.Sprintf("{\"enqueues\":%d,\"dequeues\":%d,\"empties\":%d}", totalEnqueues, totalDequeues, totalEmpties))
 }
 
 func Version(w http.ResponseWriter, req *http.Request) {
@@ -132,6 +132,8 @@ func main() {
 	http.HandleFunc("/statistics", Statistics)
 	http.HandleFunc("/version", Version)
 	http.HandleFunc("/", HealthCheck)
+
+	log.Println("Ready...")
 
 	err := http.ListenAndServe(fmt.Sprintf("%s:%d", address, port), nil)
 	if err != nil {

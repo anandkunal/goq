@@ -1,97 +1,85 @@
-// TODO: Persistence and non-persistence MODE
-
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"log"
-	"net"
+	"net/http"
 	"runtime"
 	"strings"
 	"time"
 )
 
-var (
-	address        string
-	port           int
-	maxMemoryBytes int
-	syncWrites     bool
-	dbPath         string
-
-	db               *QDB
-	memoryItems      []*QueuedItem
-	memoryItemsBytes int
+const (
+	VERSION = "1.0"
 )
 
-func connections(listener net.Listener) chan net.Conn {
-	ch := make(chan net.Conn)
-	go func() {
-		for {
-			client, err := listener.Accept()
-			if err != nil {
-				log.Printf("Failed to connect to %s\n", err)
-				continue
-			}
-			log.Printf("Connected to %v\n", client.RemoteAddr())
-			ch <- client
-		}
-	}()
-	return ch
+var (
+	address    string
+	port       int
+	syncWrites bool
+	dbPath     string
+
+	db *QDB
+)
+
+func Enqueue(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+	if req.Method != "POST" {
+		w.WriteHeader(405)
+		fmt.Fprint(w, "{success:false, message:\"post request required\"}")
+		return
+	}
+
+	data := strings.TrimSpace(req.FormValue("data"))
+	if len(data) == 0 {
+		w.WriteHeader(400)
+		fmt.Fprint(w, "{success:false, message:\"data with length > 0 required\"}")
+		return
+	}
+
+	db.Put(&QueuedItem{time.Now().UnixNano(), []byte(data)})
+	w.WriteHeader(200)
+	fmt.Fprint(w, "{success:true, message:\"worked\"}")
 }
 
-func handle(client net.Conn) {
-	b := bufio.NewReader(client)
-	for {
-		line, err := b.ReadBytes('\n')
-		if err != nil {
-			break
-		}
+func Dequeue(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
-		chunks := strings.Split(strings.Replace(string(line), "\n", "", -1), " ")
-		if len(chunks) >= 1 {
-			switch chunks[0] {
-			case "enq":
-				qi := new(QueuedItem)
-				qi.id = time.Now().UnixNano()
-				qi.data = []byte(strings.Replace(strings.Replace(string(line), "enq ", "", 1), "\n", "", -1))
-				if memoryItemsBytes+qi.Size() < maxMemoryBytes {
-					// Write to memory if we have the headroom
-					memoryItems = append(memoryItems, qi)
-					memoryItemsBytes += qi.Size()
-				}
-				// Always write to the database
-				db.Put(qi)
-
-			case "deq":
-				if len(memoryItems) > 0 {
-					qi := memoryItems[0]
-					memoryItems = memoryItems[1:]
-					memoryItemsBytes = memoryItemsBytes - qi.Size()
-					db.Remove(qi.id)
-					client.Write(qi.data)
-					client.Write([]byte("\n"))
-				} else {
-					// Get more from disk
-					// Bug: need this to be recursive
-					memoryItems, memoryItemsBytes = db.CacheFetch(maxMemoryBytes)
-					client.Write([]byte("NIL\n"))
-				}
-
-			case "stats":
-				stats := fmt.Sprintf("{\"memory_count\":%d,\"memory_bytes\":%d}\n", len(memoryItems), memoryItemsBytes)
-				client.Write([]byte(stats))
-
-			case "version":
-				client.Write([]byte("2.0\n"))
-
-			case "quit":
-				log.Printf("Disconnected %v\n", client.RemoteAddr())
-				client.Close()
-			}
-		}
+	if req.Method != "GET" {
+		w.WriteHeader(405)
+		fmt.Fprint(w, "{success:false, message:\"get request required\"}")
+		return
 	}
+
+	w.WriteHeader(200)
+
+	qi := db.Next(true)
+	if qi == nil {
+		fmt.Fprint(w, "{success:false, data:\"\", message:\"empty queue\"}")
+		return
+	}
+
+	fmt.Fprint(w, fmt.Sprintf("{success:true, data:\"%s\", message:\"worked\"}", string(qi.data)))
+}
+
+func Statistics(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(200)
+	fmt.Fprint(w, "{}")
+}
+
+func Version(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(200)
+	fmt.Fprint(w, fmt.Sprintf("{version:\"%s\"}", VERSION))
+}
+
+func HealthCheck(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(200)
+	fmt.Fprint(w, 1)
 }
 
 func init() {
@@ -99,29 +87,25 @@ func init() {
 
 	flag.StringVar(&address, "address", "", "Address to listen on. Default is all.")
 	flag.IntVar(&port, "port", 11311, "Port to listen on. Default is 11311.")
-	flag.IntVar(&maxMemoryBytes, "memory", 67108864, "Maximum amount of bytes to store in memory and journals. Default is 64MB.")
 	flag.BoolVar(&syncWrites, "sync", true, "Synchronize database writes")
 	flag.StringVar(&dbPath, "path", "db", "Database path. Default is db in current directory.")
-
 	flag.Parse()
 }
 
 func main() {
-	log.Printf("Max memory bytes: %d\n", maxMemoryBytes)
 	log.Printf("Listening on %s:%d\n", address, port)
 	log.Printf("DB Path: %s\n", dbPath)
 
 	db = NewQDB(dbPath, syncWrites)
-	memoryItems, memoryItemsBytes = db.CacheFetch(maxMemoryBytes)
 
-	server, err := net.Listen("tcp", fmt.Sprintf("%s:%d", address, port))
+	http.HandleFunc("/enqueue", Enqueue)
+	http.HandleFunc("/dequeue", Dequeue)
+	http.HandleFunc("/statistics", Statistics)
+	http.HandleFunc("/version", Version)
+	http.HandleFunc("/", HealthCheck)
+
+	err := http.ListenAndServe(fmt.Sprintf("%s:%d", address, port), nil)
 	if err != nil {
-		log.Panic(err)
-	}
-	c := connections(server)
-
-	log.Println("Ready...")
-	for {
-		go handle(<-c)
+		panic(fmt.Sprintf("goq failed to launch: %v", err))
 	}
 }

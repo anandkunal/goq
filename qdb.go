@@ -76,30 +76,6 @@ func (self *QDB) Put(qi *QueuedItem) error {
 	return self.db.Put(QDBKey(qi.id), qi.data, &self.wo)
 }
 
-func (self *QDB) CacheFetch(maxBytes int) ([]*QueuedItem, int) {
-	self.mutex.Lock()
-	defer self.mutex.Unlock()
-
-	iter := self.db.NewIterator(nil, nil)
-	defer iter.Release()
-
-	// Collect
-	items := make([]*QueuedItem, 0)
-	totalSize := 0
-	for iter.Next() {
-		id, err := strconv.Atoi(string(iter.Key()))
-		if err != nil {
-			panic(fmt.Sprintf("goq: Key not int: %s, %s, %v", string(iter.Key()), string(iter.Value()), err))
-		}
-		qi := QueuedItem{int64(id), iter.Value()}
-		if totalSize+qi.Size() < maxBytes {
-			items = append(items, &qi)
-		}
-	}
-
-	return items, totalSize
-}
-
 func (self *QDB) Remove(id int64) error {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
@@ -118,4 +94,45 @@ func (self *QDB) Drop() {
 	if err != nil {
 		panic(fmt.Sprintf("goq: Error removing db from disk: %v", err))
 	}
+}
+
+// Abstractions
+
+func (self *QDB) Next(remove bool) *QueuedItem {
+	iter := self.db.NewIterator(nil, nil)
+	defer iter.Release()
+
+	for iter.Next() {
+		id, err := strconv.Atoi(string(iter.Key()))
+		if err != nil {
+			panic(fmt.Sprintf("goq: Key not int: %s, %s, %v", string(iter.Key()), string(iter.Value()), err))
+		}
+		if remove {
+			self.Remove(int64(id))
+		}
+		return &QueuedItem{int64(id), iter.Value()}
+	}
+
+	return nil
+}
+
+func (self *QDB) CacheFetch(maxBytes int) ([]*QueuedItem, int) {
+	iter := self.db.NewIterator(nil, nil)
+	defer iter.Release()
+
+	// Collect
+	items := make([]*QueuedItem, 0)
+	totalSize := 0
+	for iter.Next() {
+		id, err := strconv.Atoi(string(iter.Key()))
+		if err != nil {
+			panic(fmt.Sprintf("goq: Key not int: %s, %s, %v", string(iter.Key()), string(iter.Value()), err))
+		}
+		qi := QueuedItem{int64(id), iter.Value()}
+		if totalSize+qi.Size() < maxBytes {
+			items = append(items, &qi)
+		}
+	}
+
+	return items, totalSize
 }

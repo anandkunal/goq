@@ -1,0 +1,2 @@
+- bulk retrieval (up to 100)
+- memory items
